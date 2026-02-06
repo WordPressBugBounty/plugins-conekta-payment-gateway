@@ -89,6 +89,7 @@ class WC_Conekta_REST_API {
                 $billing_data = isset($params['billing_data']) ? $params['billing_data'] : null;
                 $shipping_data = isset($params['shipping_data']) ? $params['shipping_data'] : null;
                 $shipping_method = isset($params['shipping_method']) ? $params['shipping_method'] : null;
+                $discount_lines = isset($params['discount_lines']) ? $params['discount_lines'] : null;
                 
                 if (($cart_data || $billing_data) && ($is_blocks_context || $is_classic_context)) {
                     // Create an order from the cart and billing data provided by blocks or classic checkout
@@ -139,8 +140,46 @@ class WC_Conekta_REST_API {
                             $order->add_item($shipping_item);
                         }
                         
+                        // Add discount_lines (coupons) from provided data
+                        if ($discount_lines && is_array($discount_lines)) {
+                            foreach ($discount_lines as $discount) {
+                                if (isset($discount['code']) && isset($discount['amount'])) {
+                                    $coupon_item = new WC_Order_Item_Coupon();
+                                    $discount_amount = floatval($discount['amount']) / 100; // Convert from cents to currency units
+                                    $coupon_item->set_props([
+                                        'code' => sanitize_text_field($discount['code']),
+                                        'discount' => $discount_amount,
+                                        'discount_tax' => 0
+                                    ]);
+                                    $order->add_item($coupon_item);
+                                }
+                            }
+                        } else {
+                            // If discount_lines not provided, try to get from WooCommerce cart
+                            if (WC()->cart && !WC()->cart->is_empty()) {
+                                $applied_coupons = WC()->cart->get_applied_coupons();
+                                if (!empty($applied_coupons)) {
+                                    foreach ($applied_coupons as $coupon_code) {
+                                        $coupon = new WC_Coupon($coupon_code);
+                                        if ($coupon->is_valid()) {
+                                            $discount_amount = WC()->cart->get_coupon_discount_amount($coupon_code);
+                                            $discount_tax = WC()->cart->get_coupon_discount_tax_amount($coupon_code);
+                                            
+                                            $coupon_item = new WC_Order_Item_Coupon();
+                                            $coupon_item->set_props([
+                                                'code' => $coupon_code,
+                                                'discount' => $discount_amount,
+                                                'discount_tax' => $discount_tax
+                                            ]);
+                                            $order->add_item($coupon_item);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
                         // Add items from cart
-                        if (isset($cart_data['items']) && is_array($cart_data['items'])) {
+                        if (isset($cart_data['items']) && is_array($cart_data['items']) && !empty($cart_data['items'])) {
                             foreach ($cart_data['items'] as $item) {
                                 if (isset($item['id'], $item['quantity'])) {
                                     $product = wc_get_product($item['id']);
@@ -157,15 +196,36 @@ class WC_Conekta_REST_API {
                                 }
                             }
                         } else {
-                            // If no items provided, add a placeholder item
-                            $item = new WC_Order_Item_Product();
-                            $total = isset($cart_data['total']) ? ($cart_data['total'] / 100) : 1.00; // Convert from cents to currency units
-                            $item->set_props([
-                                'name' => 'Temporary 3DS validation',
-                                'quantity' => 1,
-                                'total' => $total,
-                            ]);
-                            $order->add_item($item);
+                            // If no items provided, try to get from current WooCommerce cart
+                            $cart_added = false;
+                            if (WC()->cart && !WC()->cart->is_empty()) {
+                                foreach (WC()->cart->get_cart() as $cart_item_key => $cart_item) {
+                                    $product = $cart_item['data'];
+                                    if ($product) {
+                                        $item_id = $order->add_product(
+                                            $product, 
+                                            $cart_item['quantity'],
+                                            [
+                                                'variation' => isset($cart_item['variation_id']) ? wc_get_product($cart_item['variation_id']) : null,
+                                                'total' => $cart_item['line_total']
+                                            ]
+                                        );
+                                        $cart_added = true;
+                                    }
+                                }
+                            }
+                            
+                            // If still no items, add a placeholder item
+                            if (!$cart_added) {
+                                $item = new WC_Order_Item_Product();
+                                $total = isset($cart_data['total']) ? ($cart_data['total'] / 100) : 1.00; // Convert from cents to currency units
+                                $item->set_props([
+                                    'name' => 'Temporary 3DS validation',
+                                    'quantity' => 1,
+                                    'total' => $total,
+                                ]);
+                                $order->add_item($item);
+                            }
                         }
                         
                         // Set payment method

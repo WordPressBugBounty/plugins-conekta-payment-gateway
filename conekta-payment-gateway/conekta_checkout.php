@@ -4,7 +4,7 @@
 Plugin Name: Conekta Payment Gateway
 Plugin URI: https://wordpress.org/plugins/conekta-payment-gateway/
 Description: Payment Gateway through Conekta.io for Woocommerce for both credit and debit cards as well as cash payments  and monthly installments for Mexican credit cards.
-Version: 5.4.3
+Version: 5.4.8
 Requires at least: 6.6.2
 Requires PHP: 7.4
 Author: Conekta.io
@@ -30,6 +30,7 @@ function ckpg_conekta_checkout_init_your_gateway()
         include_once('conekta_cash_block_gateway.php');
         include_once('conekta_bnpl_block_gateway.php');
         include_once('conekta_bank_transfer_block_gateway.php');
+        include_once('conekta_pay_by_bank_block_gateway.php');
 
     }
 }
@@ -91,11 +92,76 @@ function ckpg_enqueue_classic_checkout_script() {
             $short_locale = substr($locale, 0, 2);
             $gateway = $available_gateways['conekta'];
 
+            // Get cart items for classic checkout
+            $cart_items = [];
+            if (WC()->cart && !WC()->cart->is_empty()) {
+                foreach (WC()->cart->get_cart() as $cart_item_key => $cart_item) {
+                    $product = $cart_item['data'];
+                    $cart_items[] = [
+                        'id' => $cart_item['product_id'],
+                        'name' => $product->get_name() ?? '',
+                        'quantity' => $cart_item['quantity'],
+                        'total' => $cart_item['line_total'] * 100, // Convert to cents
+                        'variation_id' => $cart_item['variation_id'] ?? null
+                    ];
+                }
+            }
+
+            // Get shipping information
+            $shipping_cost = 0;
+            $shipping_method_id = '';
+            $shipping_method_label = '';
+            
+            if (WC()->cart && !WC()->cart->is_empty()) {
+                // Get shipping total (already calculated by WooCommerce)
+                $shipping_cost = (int) round(WC()->cart->get_shipping_total() * 100); // Convert to cents
+                // Get chosen shipping method
+                $chosen_methods = WC()->session->get('chosen_shipping_methods');
+                if (!empty($chosen_methods) && is_array($chosen_methods)) {
+                    $shipping_method_id = $chosen_methods[0];
+                    
+                    // Get shipping packages to find the label
+                    $packages = WC()->shipping()->get_packages();
+                    foreach ($packages as $package_key => $package) {
+                        if (isset($package['rates'][$shipping_method_id])) {
+                            $rate = $package['rates'][$shipping_method_id];
+                            $shipping_method_label = $rate->get_label();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Get discount lines (coupons)
+            $discount_lines = [];
+            if (WC()->cart && !WC()->cart->is_empty()) {
+                $applied_coupons = WC()->cart->get_applied_coupons();
+                if (!empty($applied_coupons)) {
+                    foreach ($applied_coupons as $coupon_code) {
+                        $coupon = new WC_Coupon($coupon_code);
+                        if ($coupon->is_valid()) {
+                            $discount_amount = WC()->cart->get_coupon_discount_amount($coupon_code);
+                            $discount_lines[] = [
+                                'code' => $coupon_code,
+                                'amount' => (int) round($discount_amount * 100), // Convert to cents
+                                'type' => 'coupon'
+                            ];
+                        }
+                    }
+                }
+            }
+
             wp_localize_script('conekta-classic-checkout', 'conekta_settings', [
                 'public_key' => $settings['cards_public_api_key'] ?? '',
                 'enable_msi' => $settings['is_msi_enabled'] ?? 'no',
                 'available_msi_options' => array_map('intval', (array)($settings['months'] ?? [])),
                 'amount' => WC()->cart->get_total('edit') * 100,
+                'currency' => get_woocommerce_currency(),
+                'cart_items' => $cart_items,
+                'shipping_cost' => $shipping_cost,
+                'shipping_method_id' => $shipping_method_id,
+                'shipping_method_label' => $shipping_method_label,
+                'discount_lines' => $discount_lines,
                 'locale' => $short_locale,
                 'three_ds_enabled' => $gateway->three_ds_enabled,
                 'three_ds_mode' => $gateway->three_ds_mode
