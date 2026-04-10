@@ -6,3 +6,6 @@ build/
 vendor/
 *.zip
 plan.txt
+.cache/
+*.cache
+test-results/
